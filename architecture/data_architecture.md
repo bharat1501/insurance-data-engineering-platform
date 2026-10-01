@@ -87,6 +87,9 @@ AGENT
     |
     +---- POLICY
 ```
+### CLAIM
+
+The CLAIM source retains both `policy_id` and `customer_id` because the source system provides both identifiers. The data platform will validate that the customer associated with the claim matches the customer associated with the referenced policy. `policy_id` remains the primary relationship to the policy hierarchy.
 
 ## 4. Historical Strategy
 
