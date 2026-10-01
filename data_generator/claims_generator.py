@@ -1,3 +1,4 @@
+import argparse
 import csv
 import random
 from datetime import datetime, timedelta
@@ -9,10 +10,6 @@ from pathlib import Path
 # ============================================================
 
 OUTPUT_DIR = Path("data/generated/claims")
-
-NUM_RECORDS = 1000
-
-RANDOM_SEED = 42
 
 CLAIM_TYPES = [
     "AUTO",
@@ -28,6 +25,12 @@ CLAIM_STATUSES = [
     "APPROVED",
     "REJECTED",
     "SETTLED",
+]
+
+INVALID_STATUSES = [
+    "UNKNOWN",
+    "INVALID_STATUS",
+    "PENDING_X",
 ]
 
 
@@ -47,7 +50,7 @@ def generate_claim_date():
     return today - timedelta(days=days_ago)
 
 
-def generate_claim_record(index):
+def generate_valid_claim(index):
     """
     Generate one valid claim record.
     """
@@ -120,12 +123,182 @@ def generate_claim_record(index):
 
 
 # ============================================================
+# Data Quality Issue Generators
+# ============================================================
+
+def introduce_invalid_amount(record):
+    """
+    Introduce a negative claim amount.
+    """
+
+    record["claim_amount"] = -abs(
+        float(record["claim_amount"])
+    )
+
+    return record
+
+
+def introduce_invalid_status(record):
+    """
+    Introduce an invalid claim status.
+    """
+
+    record["claim_status"] = random.choice(
+        INVALID_STATUSES
+    )
+
+    return record
+
+
+def introduce_invalid_date(record):
+    """
+    Introduce an invalid date string.
+    """
+
+    record["claim_date"] = "2026-13-45"
+
+    return record
+
+
+def introduce_null_claim_id(record):
+    """
+    Remove the claim identifier.
+    """
+
+    record["claim_id"] = None
+
+    return record
+
+
+def introduce_null_amount(record):
+    """
+    Remove the claim amount.
+    """
+
+    record["claim_amount"] = None
+
+    return record
+
+
+def introduce_data_quality_issue(record):
+    """
+    Randomly introduce one data quality issue.
+    """
+
+    issue = random.choice([
+        "invalid_amount",
+        "invalid_status",
+        "invalid_date",
+        "null_claim_id",
+        "null_amount",
+    ])
+
+    if issue == "invalid_amount":
+        return introduce_invalid_amount(record)
+
+    if issue == "invalid_status":
+        return introduce_invalid_status(record)
+
+    if issue == "invalid_date":
+        return introduce_invalid_date(record)
+
+    if issue == "null_claim_id":
+        return introduce_null_claim_id(record)
+
+    if issue == "null_amount":
+        return introduce_null_amount(record)
+
+    return record
+
+
+# ============================================================
+# Duplicate Generation
+# ============================================================
+
+def create_duplicates(records, duplicate_rate):
+    """
+    Duplicate existing records according to the requested rate.
+    """
+
+    if duplicate_rate <= 0:
+        return records
+
+    duplicate_count = int(
+        len(records) * duplicate_rate
+    )
+
+    if duplicate_count == 0:
+        return records
+
+    duplicate_records = random.sample(
+        records,
+        min(duplicate_count, len(records))
+    )
+
+    records.extend(
+        duplicate_records
+    )
+
+    return records
+
+
+# ============================================================
+# Argument Parser
+# ============================================================
+
+def parse_arguments():
+
+    parser = argparse.ArgumentParser(
+        description="Generate synthetic insurance claims data."
+    )
+
+    parser.add_argument(
+        "--records",
+        type=int,
+        default=1000,
+        help="Number of base records to generate."
+    )
+
+    parser.add_argument(
+        "--duplicate-rate",
+        type=float,
+        default=0.0,
+        help="Percentage of duplicate records."
+    )
+
+    parser.add_argument(
+        "--invalid-rate",
+        type=float,
+        default=0.0,
+        help="Percentage of records containing data quality issues."
+    )
+
+    parser.add_argument(
+        "--null-rate",
+        type=float,
+        default=0.0,
+        help="Reserved for future NULL scenarios."
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility."
+    )
+
+    return parser.parse_args()
+
+
+# ============================================================
 # Main Generator
 # ============================================================
 
 def generate_claim_file():
 
-    random.seed(RANDOM_SEED)
+    args = parse_arguments()
+
+    random.seed(args.seed)
 
     OUTPUT_DIR.mkdir(
         parents=True,
@@ -138,10 +311,31 @@ def generate_claim_file():
 
     output_file = OUTPUT_DIR / file_name
 
-    records = [
-        generate_claim_record(i)
-        for i in range(1, NUM_RECORDS + 1)
-    ]
+    records = []
+
+    invalid_count = 0
+
+    for index in range(
+        1,
+        args.records + 1
+    ):
+
+        record = generate_valid_claim(index)
+
+        if random.random() < args.invalid_rate:
+
+            record = introduce_data_quality_issue(
+                record
+            )
+
+            invalid_count += 1
+
+        records.append(record)
+
+    records = create_duplicates(
+        records,
+        args.duplicate_rate
+    )
 
     fieldnames = [
         "claim_id",
@@ -175,8 +369,20 @@ def generate_claim_file():
         writer.writerows(records)
 
     print(
-        f"Generated {len(records)} claims: "
-        f"{output_file}"
+        f"Generated {len(records)} records."
+    )
+
+    print(
+        f"Base records: {args.records}"
+    )
+
+    print(
+        f"Invalid records introduced: "
+        f"{invalid_count}"
+    )
+
+    print(
+        f"Output file: {output_file}"
     )
 
 
