@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ============================================================
+# Insurance Data Engineering Platform
+# ============================================================
+
+# macOS
+.DS_Store
+
+# Generated test/large datasets
+data/generated/
+
+# Local IDE configuration
+.idea/
+.vscode/
