@@ -1,0 +1,55 @@
+USE DATABASE INSURANCE_DB;
+USE SCHEMA RAW;
+
+COPY INTO CLAIM_RAW
+FROM
+(
+    SELECT
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        $7,
+        $8,
+        $9,
+        $10,
+        $11,
+        $12,
+
+        METADATA$FILENAME,
+        METADATA$FILE_ROW_NUMBER,
+        CURRENT_TIMESTAMP(),
+        'BATCH_20261003_001',
+        'INSURANCE_CLAIMS_SOURCE',
+
+        NULL
+
+    FROM @CLAIMS_S3_STAGE
+)
+FILE_FORMAT = (
+    FORMAT_NAME = 'INSURANCE_DB.RAW.CLAIMS_CSV_FORMAT'
+)
+ON_ERROR = 'ABORT_STATEMENT';
+
+UPDATE CLAIM_RAW
+SET RECORD_HASH = SHA2(
+    CONCAT_WS(
+        '|',
+        COALESCE(CLAIM_ID, '<NULL>'),
+        COALESCE(POLICY_ID, '<NULL>'),
+        COALESCE(CUSTOMER_ID, '<NULL>'),
+        COALESCE(CLAIM_DATE, '<NULL>'),
+        COALESCE(INCIDENT_DATE, '<NULL>'),
+        COALESCE(CLAIM_TYPE, '<NULL>'),
+        COALESCE(CLAIM_STATUS, '<NULL>'),
+        COALESCE(CLAIM_AMOUNT, '<NULL>'),
+        COALESCE(APPROVED_AMOUNT, '<NULL>'),
+        COALESCE(SETTLEMENT_DATE, '<NULL>'),
+        COALESCE(CREATED_AT, '<NULL>'),
+        COALESCE(UPDATED_AT, '<NULL>')
+    ),
+    256
+)
+WHERE LOAD_BATCH_ID = 'BATCH_20261003_001';
