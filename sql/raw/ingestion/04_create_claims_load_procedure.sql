@@ -1,3 +1,4 @@
+
 USE DATABASE INSURANCE_DB;
 USE SCHEMA RAW;
 
@@ -11,62 +12,38 @@ EXECUTE AS OWNER
 AS
 $$
 DECLARE
+    V_RUN_ID                  VARCHAR;
+    V_AUDIT_ID                VARCHAR;
+    V_SOURCE_FILE_PATH        VARCHAR;
 
-    ----------------------------------------------------------------
-    -- Execution identifiers
-    ----------------------------------------------------------------
+    V_VALIDATION_SQL          VARCHAR;
+    V_VALIDATION_QUERY_ID     VARCHAR;
+    V_VALIDATION_ERRORS       NUMBER DEFAULT 0;
+    V_VALIDATION_MESSAGE      VARCHAR;
 
-    V_RUN_ID                    VARCHAR;
-    V_AUDIT_ID                  VARCHAR;
+    V_COPY_SQL                VARCHAR;
+    V_COPY_QUERY_ID           VARCHAR;
+    V_COPY_STATUS             VARCHAR;
 
-    ----------------------------------------------------------------
-    -- Source file
-    ----------------------------------------------------------------
+    V_EXISTING_COUNT          NUMBER DEFAULT 0;
 
-    V_SOURCE_FILE_PATH          VARCHAR;
-    V_COPY_SQL                  VARCHAR;
+    V_ROWS_PARSED             NUMBER DEFAULT 0;
+    V_ROWS_LOADED             NUMBER DEFAULT 0;
+    V_ERRORS_SEEN             NUMBER DEFAULT 0;
+    V_REJECTED_COUNT          NUMBER DEFAULT 0;
+    V_FIRST_ERROR             VARCHAR;
 
-    ----------------------------------------------------------------
-    -- Idempotency
-    ----------------------------------------------------------------
+    V_START_TIME              TIMESTAMP_NTZ;
+    V_END_TIME                TIMESTAMP_NTZ;
 
-    V_EXISTING_SUCCESS_COUNT   NUMBER DEFAULT 0;
-
-    ----------------------------------------------------------------
-    -- COPY result
-    ----------------------------------------------------------------
-
-    V_COPY_QUERY_ID             VARCHAR;
-    V_COPY_STATUS               VARCHAR;
-
-    V_ROWS_PARSED               NUMBER DEFAULT 0;
-    V_ROWS_LOADED               NUMBER DEFAULT 0;
-    V_ERRORS_SEEN               NUMBER DEFAULT 0;
-    V_REJECTED_COUNT            NUMBER DEFAULT 0;
-
-    V_FIRST_ERROR               VARCHAR;
-
-    ----------------------------------------------------------------
-    -- Audit / timing
-    ----------------------------------------------------------------
-
-    V_START_TIME                TIMESTAMP_NTZ;
-    V_END_TIME                  TIMESTAMP_NTZ;
-
-    ----------------------------------------------------------------
-    -- Error handling
-    ----------------------------------------------------------------
-
-    V_ERROR_CODE                VARCHAR;
-    V_ERROR_STATE               VARCHAR;
-    V_ERROR_MESSAGE             VARCHAR;
-
+    V_FINAL_STATUS            VARCHAR;
+    V_ERROR_CODE              VARCHAR;
+    V_ERROR_STATE             VARCHAR;
+    V_ERROR_MESSAGE           VARCHAR;
 BEGIN
-
     ----------------------------------------------------------------
-    -- 1. Generate execution identifiers
+    -- 1. Initialize run identifiers and source path.
     ----------------------------------------------------------------
-
     V_RUN_ID :=
         'RUN_' ||
         TO_VARCHAR(
@@ -83,19 +60,12 @@ BEGIN
 
     V_START_TIME := CURRENT_TIMESTAMP();
 
-
-    ----------------------------------------------------------------
-    -- 2. Build source file path
-    ----------------------------------------------------------------
-
     V_SOURCE_FILE_PATH :=
         'claims/incoming/' || P_SOURCE_FILE;
 
-
     ----------------------------------------------------------------
-    -- 3. Create initial pipeline audit record
+    -- 2. Create pipeline audit entry.
     ----------------------------------------------------------------
-
     INSERT INTO INSURANCE_DB.AUDIT.PIPELINE_RUN
     (
         RUN_ID,
@@ -119,122 +89,200 @@ BEGIN
         'RUNNING'
     );
 
-
     ----------------------------------------------------------------
-    -- 4. Application-level idempotency check
-    --
-    -- If the same batch + file has already completed successfully,
-    -- do not execute COPY again.
+    -- 3. Idempotency: skip an already successful batch/file.
     ----------------------------------------------------------------
-
     SELECT COUNT(*)
-    INTO :V_EXISTING_SUCCESS_COUNT
+      INTO :V_EXISTING_COUNT
     FROM INSURANCE_DB.AUDIT.PIPELINE_RUN
     WHERE LOAD_BATCH_ID = :P_BATCH_ID
       AND SOURCE_FILE = :P_SOURCE_FILE
       AND STATUS = 'SUCCESS';
 
-
-    IF (V_EXISTING_SUCCESS_COUNT > 0) THEN
-
+    IF (V_EXISTING_COUNT > 0) THEN
         V_END_TIME := CURRENT_TIMESTAMP();
 
         V_ERROR_MESSAGE :=
             'Batch/file already processed successfully';
 
-
         UPDATE INSURANCE_DB.AUDIT.PIPELINE_RUN
-        SET
-            PIPELINE_END_TIME = :V_END_TIME,
+        SET PIPELINE_END_TIME = :V_END_TIME,
             STATUS = 'SKIPPED',
             ERROR_MESSAGE = :V_ERROR_MESSAGE
         WHERE RUN_ID = :V_RUN_ID;
-
 
         RETURN
             'SKIPPED | ALREADY_PROCESSED' ||
             ' | BATCH_ID=' || P_BATCH_ID ||
             ' | FILE=' || P_SOURCE_FILE;
-
     END IF;
 
+    ----------------------------------------------------------------
+    -- 4. Prevent automatic retry of a previously partial batch.
+    ----------------------------------------------------------------
+    SELECT COUNT(*)
+      INTO :V_EXISTING_COUNT
+    FROM INSURANCE_DB.AUDIT.PIPELINE_RUN
+    WHERE LOAD_BATCH_ID = :P_BATCH_ID
+      AND SOURCE_FILE = :P_SOURCE_FILE
+      AND STATUS = 'PARTIAL_SUCCESS';
+
+    IF (V_EXISTING_COUNT > 0) THEN
+        V_END_TIME := CURRENT_TIMESTAMP();
+
+        V_ERROR_MESSAGE :=
+            'Previous partial load requires controlled recovery';
+
+        UPDATE INSURANCE_DB.AUDIT.PIPELINE_RUN
+        SET PIPELINE_END_TIME = :V_END_TIME,
+            STATUS = 'SKIPPED',
+            ERROR_MESSAGE = :V_ERROR_MESSAGE
+        WHERE RUN_ID = :V_RUN_ID;
+
+        RETURN
+            'SKIPPED | RECOVERY_REQUIRED' ||
+            ' | BATCH_ID=' || P_BATCH_ID ||
+            ' | FILE=' || P_SOURCE_FILE;
+    END IF;
 
     ----------------------------------------------------------------
-    -- 5. Build dynamic COPY statement
+    -- 5. Validate CSV structure BEFORE production ingestion.
+    --
+    -- VALIDATION_MODE cannot be combined with a transformed COPY.
+    -- This COPY targets the 12-column validation table and does
+    -- not load data. The strict file format detects column-count
+    -- mismatches.
     ----------------------------------------------------------------
+    V_VALIDATION_SQL :=
+        'COPY INTO INSURANCE_DB.RAW.CLAIM_CSV_PARSE_TEST ' ||
+        'FROM @INSURANCE_DB.RAW.CLAIMS_S3_STAGE/ ' ||
+        'FILES = (''' ||
+            REPLACE(P_SOURCE_FILE, '''', '''''') ||
+        ''') ' ||
+        'FILE_FORMAT = (' ||
+            'FORMAT_NAME = ' ||
+            '''INSURANCE_DB.RAW.CLAIMS_CSV_STRICT_FORMAT''' ||
+        ') ' ||
+        'VALIDATION_MODE = ''RETURN_ALL_ERRORS''';
 
+    EXECUTE IMMEDIATE :V_VALIDATION_SQL;
+
+    V_VALIDATION_QUERY_ID := SQLID;
+
+    SELECT
+        COUNT(*),
+        MAX(ERROR)
+    INTO
+        :V_VALIDATION_ERRORS,
+        :V_VALIDATION_MESSAGE
+    FROM TABLE(
+        RESULT_SCAN(:V_VALIDATION_QUERY_ID)
+    );
+
+    ----------------------------------------------------------------
+    -- 6. If validation finds errors, do not execute production COPY.
+    ----------------------------------------------------------------
+    IF (V_VALIDATION_ERRORS > 0) THEN
+        V_END_TIME := CURRENT_TIMESTAMP();
+
+        V_FINAL_STATUS := 'FAILED';
+
+        V_ERROR_MESSAGE :=
+            'CSV structural validation failed' ||
+            ' | VALIDATION_ERRORS=' ||
+            V_VALIDATION_ERRORS ||
+            ' | FIRST_ERROR=' ||
+            COALESCE(V_VALIDATION_MESSAGE, 'See validation output');
+
+        UPDATE INSURANCE_DB.AUDIT.PIPELINE_RUN
+        SET PIPELINE_END_TIME = :V_END_TIME,
+            SOURCE_RECORD_COUNT = NULL,
+            LOADED_RECORD_COUNT = 0,
+            REJECTED_RECORD_COUNT = NULL,
+            STATUS = :V_FINAL_STATUS,
+            ERROR_MESSAGE = :V_ERROR_MESSAGE
+        WHERE RUN_ID = :V_RUN_ID;
+
+        INSERT INTO INSURANCE_DB.AUDIT.DATA_LOAD_AUDIT
+        (
+            AUDIT_ID,
+            RUN_ID,
+            SOURCE_SYSTEM,
+            SOURCE_ENTITY,
+            SOURCE_FILE,
+            SOURCE_FILE_PATH,
+            LOAD_BATCH_ID,
+            FILE_RECORD_COUNT,
+            LOADED_RECORD_COUNT,
+            REJECTED_RECORD_COUNT,
+            DUPLICATE_RECORD_COUNT,
+            LOAD_START_TIME,
+            LOAD_END_TIME,
+            LOAD_STATUS,
+            ERROR_MESSAGE
+        )
+        VALUES
+        (
+            :V_AUDIT_ID,
+            :V_RUN_ID,
+            'INSURANCE_CLAIMS_SOURCE',
+            'CLAIM',
+            :P_SOURCE_FILE,
+            's3://insurance-data-engineering-platform-467f70cf/'
+                || :V_SOURCE_FILE_PATH,
+            :P_BATCH_ID,
+            NULL,
+            0,
+            NULL,
+            0,
+            :V_START_TIME,
+            :V_END_TIME,
+            'FAILED',
+            :V_ERROR_MESSAGE
+        );
+
+        RETURN
+            'FAILED | CSV_VALIDATION_ERROR' ||
+            ' | RUN_ID=' || V_RUN_ID ||
+            ' | FILE=' || P_SOURCE_FILE ||
+            ' | VALIDATION_ERRORS=' || V_VALIDATION_ERRORS;
+    END IF;
+
+    ----------------------------------------------------------------
+    -- 7. Validation passed. Execute the production COPY.
+    ----------------------------------------------------------------
     V_COPY_SQL :=
         'COPY INTO INSURANCE_DB.RAW.CLAIM_RAW ' ||
-
         'FROM (' ||
-
-        'SELECT ' ||
-            '$1, ' ||
-            '$2, ' ||
-            '$3, ' ||
-            '$4, ' ||
-            '$5, ' ||
-            '$6, ' ||
-            '$7, ' ||
-            '$8, ' ||
-            '$9, ' ||
-            '$10, ' ||
-            '$11, ' ||
-            '$12, ' ||
-
-            'METADATA$FILENAME, ' ||
-            'METADATA$FILE_ROW_NUMBER, ' ||
-            'CURRENT_TIMESTAMP(), ' ||
-
-            '''' ||
-            REPLACE(:P_BATCH_ID, '''', '''''') ||
-            ''', ' ||
-
-            '''INSURANCE_CLAIMS_SOURCE'', ' ||
-
-            'NULL ' ||
-
-        'FROM @INSURANCE_DB.RAW.CLAIMS_S3_STAGE ' ||
-
+            'SELECT ' ||
+                '$1, $2, $3, $4, $5, $6, ' ||
+                '$7, $8, $9, $10, $11, $12, ' ||
+                'METADATA$FILENAME, ' ||
+                'METADATA$FILE_ROW_NUMBER, ' ||
+                'CURRENT_TIMESTAMP(), ' ||
+                '''' ||
+                    REPLACE(P_BATCH_ID, '''', '''''') ||
+                ''', ' ||
+                '''INSURANCE_CLAIMS_SOURCE'', ' ||
+                'NULL ' ||
+            'FROM @INSURANCE_DB.RAW.CLAIMS_S3_STAGE ' ||
         ') ' ||
-
         'FILES = (''' ||
-        REPLACE(:P_SOURCE_FILE, '''', '''''') ||
+            REPLACE(P_SOURCE_FILE, '''', '''''') ||
         ''') ' ||
-
         'FILE_FORMAT = (' ||
-        'FORMAT_NAME = ''INSURANCE_DB.RAW.CLAIMS_CSV_FORMAT''' ||
+            'FORMAT_NAME = ' ||
+            '''INSURANCE_DB.RAW.CLAIMS_CSV_STRICT_FORMAT''' ||
         ') ' ||
-
         'ON_ERROR = ''CONTINUE''';
-
-
-    ----------------------------------------------------------------
-    -- 6. Execute COPY
-    ----------------------------------------------------------------
 
     EXECUTE IMMEDIATE :V_COPY_SQL;
 
-
-    ----------------------------------------------------------------
-    -- 7. Capture COPY query ID
-    ----------------------------------------------------------------
-
     V_COPY_QUERY_ID := SQLID;
 
-
     ----------------------------------------------------------------
-    -- 8. Read COPY result
-    --
-    -- $1 = FILE
-    -- $2 = STATUS
-    -- $3 = ROWS_PARSED
-    -- $4 = ROWS_LOADED
-    -- $5 = ERROR_LIMIT
-    -- $6 = ERRORS_SEEN
-    -- $7 = FIRST_ERROR
+    -- 8. Capture COPY result metrics.
     ----------------------------------------------------------------
-
     SELECT
         COALESCE(SUM($3), 0),
         COALESCE(SUM($4), 0),
@@ -251,274 +299,168 @@ BEGIN
         RESULT_SCAN(:V_COPY_QUERY_ID)
     );
 
-
-    ----------------------------------------------------------------
-    -- 9. Calculate rejected records
-    ----------------------------------------------------------------
-
     V_REJECTED_COUNT :=
         GREATEST(
             V_ROWS_PARSED - V_ROWS_LOADED,
             0
         );
 
+    V_END_TIME := CURRENT_TIMESTAMP();
 
     ----------------------------------------------------------------
-    -- 10. Handle Snowflake COPY-level idempotency
-    --
-    -- This is a secondary protection.
-    -- Snowflake may return LOAD_SKIPPED when it recognizes that
-    -- the file was previously loaded.
+    -- 9. Determine final ingestion status.
     ----------------------------------------------------------------
-
     IF (
         COALESCE(V_COPY_STATUS, '') = 'LOAD_SKIPPED'
     ) THEN
-
-        V_END_TIME := CURRENT_TIMESTAMP();
+        V_FINAL_STATUS := 'SKIPPED';
 
         V_ERROR_MESSAGE :=
-            'Snowflake skipped file because it was already loaded';
+            'Snowflake skipped this file based on load history';
 
-
-        UPDATE INSURANCE_DB.AUDIT.PIPELINE_RUN
-        SET
-            PIPELINE_END_TIME = :V_END_TIME,
-            SOURCE_RECORD_COUNT = 0,
-            LOADED_RECORD_COUNT = 0,
-            REJECTED_RECORD_COUNT = 0,
-            STATUS = 'SKIPPED',
-            ERROR_MESSAGE = :V_ERROR_MESSAGE
-        WHERE RUN_ID = :V_RUN_ID;
-
-
-        RETURN
-            'SKIPPED | SNOWFLAKE_FILE_ALREADY_LOADED' ||
-            ' | BATCH_ID=' || P_BATCH_ID ||
-            ' | FILE=' || P_SOURCE_FILE;
-
-    END IF;
-
-
-    ----------------------------------------------------------------
-    -- 11. Populate RECORD_HASH
-    ----------------------------------------------------------------
-
-    UPDATE INSURANCE_DB.RAW.CLAIM_RAW
-    SET RECORD_HASH =
-        SHA2(
-            CONCAT_WS(
-                '|',
-                COALESCE(CLAIM_ID, '<NULL>'),
-                COALESCE(POLICY_ID, '<NULL>'),
-                COALESCE(CUSTOMER_ID, '<NULL>'),
-                COALESCE(CLAIM_DATE, '<NULL>'),
-                COALESCE(INCIDENT_DATE, '<NULL>'),
-                COALESCE(CLAIM_TYPE, '<NULL>'),
-                COALESCE(CLAIM_STATUS, '<NULL>'),
-                COALESCE(CLAIM_AMOUNT, '<NULL>'),
-                COALESCE(APPROVED_AMOUNT, '<NULL>'),
-                COALESCE(SETTLEMENT_DATE, '<NULL>'),
-                COALESCE(CREATED_AT, '<NULL>'),
-                COALESCE(UPDATED_AT, '<NULL>')
-            ),
-            256
-        )
-    WHERE LOAD_BATCH_ID = :P_BATCH_ID
-      AND SOURCE_FILE = :V_SOURCE_FILE_PATH
-      AND RECORD_HASH IS NULL;
-
-
-    ----------------------------------------------------------------
-    -- 12. Capture end time
-    ----------------------------------------------------------------
-
-    V_END_TIME := CURRENT_TIMESTAMP();
-
-
-    ----------------------------------------------------------------
-    -- 13. Determine final status
-    --
-    -- SUCCESS requires:
-    --   - rows parsed > 0
-    --   - all parsed rows loaded
-    --   - zero COPY errors
-    ----------------------------------------------------------------
-
-    IF (
+    ELSEIF (
         V_ROWS_PARSED > 0
         AND V_ROWS_PARSED = V_ROWS_LOADED
         AND V_ERRORS_SEEN = 0
     ) THEN
+        V_FINAL_STATUS := 'SUCCESS';
+        V_ERROR_MESSAGE := NULL;
 
-
-        ----------------------------------------------------------------
-        -- 14. Update pipeline audit
-        ----------------------------------------------------------------
-
-        UPDATE INSURANCE_DB.AUDIT.PIPELINE_RUN
-        SET
-            PIPELINE_END_TIME = :V_END_TIME,
-            SOURCE_RECORD_COUNT = :V_ROWS_PARSED,
-            LOADED_RECORD_COUNT = :V_ROWS_LOADED,
-            REJECTED_RECORD_COUNT = :V_REJECTED_COUNT,
-            STATUS = 'SUCCESS',
-            ERROR_MESSAGE = NULL
-        WHERE RUN_ID = :V_RUN_ID;
-
-
-        ----------------------------------------------------------------
-        -- 15. Insert file-level audit
-        ----------------------------------------------------------------
-
-        INSERT INTO INSURANCE_DB.AUDIT.DATA_LOAD_AUDIT
-        (
-            AUDIT_ID,
-            RUN_ID,
-            SOURCE_SYSTEM,
-            SOURCE_ENTITY,
-            SOURCE_FILE,
-            SOURCE_FILE_PATH,
-            LOAD_BATCH_ID,
-            FILE_RECORD_COUNT,
-            LOADED_RECORD_COUNT,
-            REJECTED_RECORD_COUNT,
-            DUPLICATE_RECORD_COUNT,
-            LOAD_START_TIME,
-            LOAD_END_TIME,
-            LOAD_STATUS,
-            ERROR_MESSAGE
+    ELSEIF (
+        V_ROWS_LOADED > 0
+        AND (
+            V_ERRORS_SEEN > 0
+            OR V_ROWS_LOADED < V_ROWS_PARSED
         )
-        VALUES
-        (
-            :V_AUDIT_ID,
-            :V_RUN_ID,
-            'INSURANCE_CLAIMS_SOURCE',
-            'CLAIM',
-            :P_SOURCE_FILE,
-            's3://insurance-data-engineering-platform-467f70cf/'
-                || :V_SOURCE_FILE_PATH,
-            :P_BATCH_ID,
-            :V_ROWS_PARSED,
-            :V_ROWS_LOADED,
-            :V_REJECTED_COUNT,
-            0,
-            :V_START_TIME,
-            :V_END_TIME,
-            'SUCCESS',
-            NULL
-        );
-
-
-        RETURN
-            'SUCCESS | RUN_ID=' || V_RUN_ID ||
-            ' | FILE=' || P_SOURCE_FILE ||
-            ' | PARSED=' || V_ROWS_PARSED ||
-            ' | LOADED=' || V_ROWS_LOADED ||
-            ' | REJECTED=' || V_REJECTED_COUNT;
-
-
-    ELSE
-
-
-        ----------------------------------------------------------------
-        -- 16. Failed / partial load
-        ----------------------------------------------------------------
+    ) THEN
+        V_FINAL_STATUS := 'PARTIAL_SUCCESS';
 
         V_ERROR_MESSAGE :=
-            'COPY failed or reconciliation failed. ' ||
-            'STATUS=' ||
+            'Partial load' ||
+            ' | COPY_STATUS=' ||
             COALESCE(V_COPY_STATUS, 'UNKNOWN') ||
-            ' | PARSED=' ||
-            V_ROWS_PARSED ||
-            ' | LOADED=' ||
-            V_ROWS_LOADED ||
-            ' | REJECTED=' ||
-            V_REJECTED_COUNT ||
-            ' | ERRORS_SEEN=' ||
-            V_ERRORS_SEEN ||
+            ' | PARSED=' || V_ROWS_PARSED ||
+            ' | LOADED=' || V_ROWS_LOADED ||
+            ' | REJECTED=' || V_REJECTED_COUNT ||
+            ' | ERRORS_SEEN=' || V_ERRORS_SEEN ||
             ' | FIRST_ERROR=' ||
             COALESCE(V_FIRST_ERROR, 'NONE');
 
+    ELSE
+        V_FINAL_STATUS := 'FAILED';
 
-        UPDATE INSURANCE_DB.AUDIT.PIPELINE_RUN
-        SET
-            PIPELINE_END_TIME = :V_END_TIME,
-            SOURCE_RECORD_COUNT = :V_ROWS_PARSED,
-            LOADED_RECORD_COUNT = :V_ROWS_LOADED,
-            REJECTED_RECORD_COUNT = :V_REJECTED_COUNT,
-            STATUS = 'FAILED',
-            ERROR_MESSAGE = :V_ERROR_MESSAGE
-        WHERE RUN_ID = :V_RUN_ID;
-
-
-        INSERT INTO INSURANCE_DB.AUDIT.DATA_LOAD_AUDIT
-        (
-            AUDIT_ID,
-            RUN_ID,
-            SOURCE_SYSTEM,
-            SOURCE_ENTITY,
-            SOURCE_FILE,
-            SOURCE_FILE_PATH,
-            LOAD_BATCH_ID,
-            FILE_RECORD_COUNT,
-            LOADED_RECORD_COUNT,
-            REJECTED_RECORD_COUNT,
-            DUPLICATE_RECORD_COUNT,
-            LOAD_START_TIME,
-            LOAD_END_TIME,
-            LOAD_STATUS,
-            ERROR_MESSAGE
-        )
-        VALUES
-        (
-            :V_AUDIT_ID,
-            :V_RUN_ID,
-            'INSURANCE_CLAIMS_SOURCE',
-            'CLAIM',
-            :P_SOURCE_FILE,
-            's3://insurance-data-engineering-platform-467f70cf/'
-                || :V_SOURCE_FILE_PATH,
-            :P_BATCH_ID,
-            :V_ROWS_PARSED,
-            :V_ROWS_LOADED,
-            :V_REJECTED_COUNT,
-            0,
-            :V_START_TIME,
-            :V_END_TIME,
-            'FAILED',
-            :V_ERROR_MESSAGE
-        );
-
-
-        RETURN
-            'FAILED | RUN_ID=' || V_RUN_ID ||
-            ' | FILE=' || P_SOURCE_FILE ||
+        V_ERROR_MESSAGE :=
+            'Load failed or no records loaded' ||
+            ' | COPY_STATUS=' ||
+            COALESCE(V_COPY_STATUS, 'UNKNOWN') ||
             ' | PARSED=' || V_ROWS_PARSED ||
             ' | LOADED=' || V_ROWS_LOADED ||
-            ' | REJECTED=' || V_REJECTED_COUNT;
-
+            ' | REJECTED=' || V_REJECTED_COUNT ||
+            ' | ERRORS_SEEN=' || V_ERRORS_SEEN ||
+            ' | FIRST_ERROR=' ||
+            COALESCE(V_FIRST_ERROR, 'NONE');
     END IF;
 
+    ----------------------------------------------------------------
+    -- 10. Populate hashes for records loaded in this batch/file.
+    ----------------------------------------------------------------
+    IF (V_ROWS_LOADED > 0) THEN
+        UPDATE INSURANCE_DB.RAW.CLAIM_RAW
+        SET RECORD_HASH =
+            SHA2(
+                CONCAT_WS(
+                    '|',
+                    COALESCE(CLAIM_ID, '<NULL>'),
+                    COALESCE(POLICY_ID, '<NULL>'),
+                    COALESCE(CUSTOMER_ID, '<NULL>'),
+                    COALESCE(CLAIM_DATE, '<NULL>'),
+                    COALESCE(INCIDENT_DATE, '<NULL>'),
+                    COALESCE(CLAIM_TYPE, '<NULL>'),
+                    COALESCE(CLAIM_STATUS, '<NULL>'),
+                    COALESCE(CLAIM_AMOUNT, '<NULL>'),
+                    COALESCE(APPROVED_AMOUNT, '<NULL>'),
+                    COALESCE(SETTLEMENT_DATE, '<NULL>'),
+                    COALESCE(CREATED_AT, '<NULL>'),
+                    COALESCE(UPDATED_AT, '<NULL>')
+                ),
+                256
+            )
+        WHERE LOAD_BATCH_ID = :P_BATCH_ID
+          AND SOURCE_FILE = :V_SOURCE_FILE_PATH
+          AND RECORD_HASH IS NULL;
+    END IF;
 
-----------------------------------------------------------------
--- 17. Exception handling
-----------------------------------------------------------------
+    ----------------------------------------------------------------
+    -- 11. Update pipeline audit.
+    ----------------------------------------------------------------
+    UPDATE INSURANCE_DB.AUDIT.PIPELINE_RUN
+    SET PIPELINE_END_TIME = :V_END_TIME,
+        SOURCE_RECORD_COUNT = :V_ROWS_PARSED,
+        LOADED_RECORD_COUNT = :V_ROWS_LOADED,
+        REJECTED_RECORD_COUNT = :V_REJECTED_COUNT,
+        STATUS = :V_FINAL_STATUS,
+        ERROR_MESSAGE = :V_ERROR_MESSAGE
+    WHERE RUN_ID = :V_RUN_ID;
+
+    ----------------------------------------------------------------
+    -- 12. Insert detailed load audit.
+    ----------------------------------------------------------------
+    INSERT INTO INSURANCE_DB.AUDIT.DATA_LOAD_AUDIT
+    (
+        AUDIT_ID,
+        RUN_ID,
+        SOURCE_SYSTEM,
+        SOURCE_ENTITY,
+        SOURCE_FILE,
+        SOURCE_FILE_PATH,
+        LOAD_BATCH_ID,
+        FILE_RECORD_COUNT,
+        LOADED_RECORD_COUNT,
+        REJECTED_RECORD_COUNT,
+        DUPLICATE_RECORD_COUNT,
+        LOAD_START_TIME,
+        LOAD_END_TIME,
+        LOAD_STATUS,
+        ERROR_MESSAGE
+    )
+    VALUES
+    (
+        :V_AUDIT_ID,
+        :V_RUN_ID,
+        'INSURANCE_CLAIMS_SOURCE',
+        'CLAIM',
+        :P_SOURCE_FILE,
+        's3://insurance-data-engineering-platform-467f70cf/'
+            || :V_SOURCE_FILE_PATH,
+        :P_BATCH_ID,
+        :V_ROWS_PARSED,
+        :V_ROWS_LOADED,
+        :V_REJECTED_COUNT,
+        0,
+        :V_START_TIME,
+        :V_END_TIME,
+        :V_FINAL_STATUS,
+        :V_ERROR_MESSAGE
+    );
+
+    RETURN
+        V_FINAL_STATUS ||
+        ' | RUN_ID=' || V_RUN_ID ||
+        ' | FILE=' || P_SOURCE_FILE ||
+        ' | PARSED=' || V_ROWS_PARSED ||
+        ' | LOADED=' || V_ROWS_LOADED ||
+        ' | REJECTED=' || V_REJECTED_COUNT ||
+        ' | ERRORS=' || V_ERRORS_SEEN;
 
 EXCEPTION
-
     WHEN OTHER THEN
-
         V_END_TIME := CURRENT_TIMESTAMP();
-
         V_ERROR_CODE := SQLCODE;
         V_ERROR_STATE := SQLSTATE;
         V_ERROR_MESSAGE := SQLERRM;
 
-
         UPDATE INSURANCE_DB.AUDIT.PIPELINE_RUN
-        SET
-            PIPELINE_END_TIME = :V_END_TIME,
+        SET PIPELINE_END_TIME = :V_END_TIME,
             STATUS = 'FAILED',
             ERROR_MESSAGE =
                 :V_ERROR_CODE || ' | ' ||
@@ -526,12 +468,11 @@ EXCEPTION
                 :V_ERROR_MESSAGE
         WHERE RUN_ID = :V_RUN_ID;
 
-
         RETURN
             'FAILED | RUN_ID=' || V_RUN_ID ||
             ' | SQLCODE=' || V_ERROR_CODE ||
             ' | SQLSTATE=' || V_ERROR_STATE ||
             ' | ERROR=' || V_ERROR_MESSAGE;
-
 END;
 $$;
+
