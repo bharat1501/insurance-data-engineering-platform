@@ -287,6 +287,27 @@ def parse_arguments():
         help="Random seed for reproducibility."
     )
 
+    parser.add_argument(
+        "--id-offset",
+        type=int,
+        default=0,
+        help="Offset for claim IDs to keep IDs unique across generated files."
+    )
+
+    parser.add_argument(
+        "--file-suffix",
+        type=str,
+        default="001",
+        help="Output file suffix, such as 001 or 002."
+    )
+
+    parser.add_argument(
+        "--policy-file",
+        type=Path,
+        required=True,
+        help="CSV containing policy_id and customer_id columns."
+    )
+
     return parser.parse_args()
 
 
@@ -306,10 +327,36 @@ def generate_claim_file():
     )
 
     file_name = (
-        f"claims_{datetime.now():%Y%m%d}_001.csv"
+        f"claims_{datetime.now():%Y%m%d}_{args.file_suffix}.csv"
     )
 
     output_file = OUTPUT_DIR / file_name
+
+    if not args.policy_file.exists():
+        raise FileNotFoundError(
+            f"Policy file not found: {args.policy_file}"
+        )
+
+    with args.policy_file.open(
+        "r", newline="", encoding="utf-8"
+    ) as policy_csv:
+        reader = csv.DictReader(policy_csv)
+        required = {"policy_id", "customer_id"}
+
+        if not required.issubset(set(reader.fieldnames or [])):
+            raise ValueError(
+                "Policy CSV must contain policy_id and customer_id columns."
+            )
+
+        policies = [
+            {"policy_id": row["policy_id"],
+             "customer_id": row["customer_id"]}
+            for row in reader
+            if row.get("policy_id") and row.get("customer_id")
+        ]
+
+    if not policies:
+        raise ValueError("No valid policies found in the policy CSV.")
 
     records = []
 
@@ -320,7 +367,11 @@ def generate_claim_file():
         args.records + 1
     ):
 
-        record = generate_valid_claim(index)
+        record = generate_valid_claim(index + args.id_offset)
+
+        policy = random.choice(policies)
+        record["policy_id"] = policy["policy_id"]
+        record["customer_id"] = policy["customer_id"]
 
         if random.random() < args.invalid_rate:
 
