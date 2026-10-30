@@ -33,7 +33,7 @@ USING (
             WHEN TRY_TO_DATE(CLAIM_DATE) IS NULL
                 THEN 'INVALID_CLAIM_DATE'
             WHEN CLAIM_STATUS IS NULL OR CLAIM_STATUS NOT IN (
-                'SUBMITTED', 'UNDER_REVIEW', 'APPROVED',
+               'OPEN', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED',
                 'REJECTED', 'SETTLED'
             )
                 THEN 'INVALID_CLAIM_STATUS'
