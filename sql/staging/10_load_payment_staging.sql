@@ -1,0 +1,207 @@
+USE DATABASE INSURANCE_DB;
+USE SCHEMA STAGING;
+
+SET BATCH_ID = 'BATCH_20261003_001';
+
+MERGE INTO PAYMENT_STAGING T
+USING (
+    WITH PAYMENT_JSON AS (
+        SELECT
+            P.SOURCE_FILE,
+            P.FILE_ROW_NUMBER,
+            P.LOAD_TIMESTAMP,
+            P.LOAD_BATCH_ID,
+            P.SOURCE_SYSTEM,
+            P.RECORD_HASH,
+            P.RAW_PAYLOAD,
+
+            MAX(IFF(F.KEY = 'payment_id', F.VALUE::VARCHAR, NULL))
+                AS PAYMENT_ID,
+
+            MAX(IFF(F.KEY = 'claim_id', F.VALUE::VARCHAR, NULL))
+                AS CLAIM_ID,
+
+            MAX(IFF(F.KEY = 'policy_id', F.VALUE::VARCHAR, NULL))
+                AS POLICY_ID,
+
+            MAX(IFF(F.KEY = 'payment_amount', F.VALUE::VARCHAR, NULL))
+                AS PAYMENT_AMOUNT_RAW,
+
+            MAX(IFF(F.KEY = 'payment_date', F.VALUE::VARCHAR, NULL))
+                AS PAYMENT_DATE_RAW,
+
+            MAX(IFF(F.KEY = 'payment_method', F.VALUE::VARCHAR, NULL))
+                AS PAYMENT_METHOD,
+
+            MAX(IFF(F.KEY = 'payment_status', F.VALUE::VARCHAR, NULL))
+                AS PAYMENT_STATUS,
+
+            MAX(IFF(F.KEY = 'created_at', F.VALUE::VARCHAR, NULL))
+                AS CREATED_AT_RAW,
+
+            MAX(IFF(F.KEY = 'updated_at', F.VALUE::VARCHAR, NULL))
+                AS UPDATED_AT_RAW
+
+        FROM INSURANCE_DB.RAW.PAYMENT_RAW P,
+        LATERAL FLATTEN(INPUT => P.RAW_PAYLOAD) F
+
+        WHERE P.LOAD_BATCH_ID = $BATCH_ID
+
+        GROUP BY
+            P.SOURCE_FILE,
+            P.FILE_ROW_NUMBER,
+            P.LOAD_TIMESTAMP,
+            P.LOAD_BATCH_ID,
+            P.SOURCE_SYSTEM,
+            P.RECORD_HASH,
+            P.RAW_PAYLOAD
+    ),
+
+    TRANSFORMED AS (
+        SELECT
+            PAYMENT_ID,
+            CLAIM_ID,
+            POLICY_ID,
+            TRY_TO_DECIMAL(PAYMENT_AMOUNT_RAW, 18, 2)
+                AS PAYMENT_AMOUNT,
+            TRY_TO_DATE(PAYMENT_DATE_RAW)
+                AS PAYMENT_DATE,
+            PAYMENT_METHOD,
+            PAYMENT_STATUS,
+            TRY_TO_TIMESTAMP_NTZ(CREATED_AT_RAW)
+                AS CREATED_AT,
+            TRY_TO_TIMESTAMP_NTZ(UPDATED_AT_RAW)
+                AS UPDATED_AT,
+            RAW_PAYLOAD,
+            SOURCE_FILE,
+            FILE_ROW_NUMBER,
+            LOAD_TIMESTAMP,
+            LOAD_BATCH_ID,
+            SOURCE_SYSTEM,
+            RECORD_HASH,
+
+            PAYMENT_AMOUNT_RAW,
+            PAYMENT_DATE_RAW,
+            CREATED_AT_RAW,
+            UPDATED_AT_RAW
+
+        FROM PAYMENT_JSON
+    )
+
+    SELECT
+        X.* EXCLUDE (
+            PAYMENT_AMOUNT_RAW,
+            PAYMENT_DATE_RAW,
+            CREATED_AT_RAW,
+            UPDATED_AT_RAW
+        ),
+
+        CASE
+            WHEN PAYMENT_ID IS NULL OR TRIM(PAYMENT_ID) = ''
+                THEN 'MISSING PAYMENT_ID'
+            WHEN CLAIM_ID IS NULL OR TRIM(CLAIM_ID) = ''
+                THEN 'MISSING CLAIM_ID'
+            WHEN POLICY_ID IS NULL OR TRIM(POLICY_ID) = ''
+                THEN 'MISSING POLICY_ID'
+            WHEN PAYMENT_AMOUNT_RAW IS NULL
+                THEN 'MISSING PAYMENT_AMOUNT'
+            WHEN PAYMENT_AMOUNT IS NULL
+                THEN 'INVALID PAYMENT_AMOUNT'
+            WHEN PAYMENT_AMOUNT < 0
+                THEN 'NEGATIVE PAYMENT_AMOUNT'
+            WHEN PAYMENT_DATE_RAW IS NULL
+                THEN 'MISSING PAYMENT_DATE'
+            WHEN PAYMENT_DATE IS NULL
+                THEN 'INVALID PAYMENT_DATE'
+            WHEN PAYMENT_METHOD IS NULL OR TRIM(PAYMENT_METHOD) = ''
+                THEN 'MISSING PAYMENT_METHOD'
+            WHEN PAYMENT_STATUS IS NULL OR TRIM(PAYMENT_STATUS) = ''
+                THEN 'MISSING PAYMENT_STATUS'
+            WHEN CREATED_AT_RAW IS NOT NULL
+                 AND CREATED_AT IS NULL
+                THEN 'INVALID CREATED_AT'
+            WHEN UPDATED_AT_RAW IS NOT NULL
+                 AND UPDATED_AT IS NULL
+                THEN 'INVALID UPDATED_AT'
+            WHEN NOT EXISTS (
+                SELECT 1
+                FROM INSURANCE_DB.STAGING.CLAIM_STAGING C
+                WHERE C.CLAIM_ID = X.CLAIM_ID
+                  AND C.STAGING_STATUS = 'VALID'
+            )
+                THEN 'CLAIM NOT FOUND IN VALID STAGING'
+            WHEN NOT EXISTS (
+                SELECT 1
+                FROM INSURANCE_DB.STAGING.POLICY_STAGING POL
+                WHERE POL.POLICY_ID = X.POLICY_ID
+                  AND POL.STAGING_STATUS = 'VALID'
+            )
+                THEN 'POLICY NOT FOUND IN VALID STAGING'
+            ELSE NULL
+        END AS VALIDATION_REASON
+
+    FROM TRANSFORMED X
+) S
+
+ON  T.LOAD_BATCH_ID = S.LOAD_BATCH_ID
+AND T.SOURCE_FILE = S.SOURCE_FILE
+AND T.FILE_ROW_NUMBER = S.FILE_ROW_NUMBER
+
+WHEN MATCHED THEN UPDATE SET
+    T.PAYMENT_ID = S.PAYMENT_ID,
+    T.CLAIM_ID = S.CLAIM_ID,
+    T.POLICY_ID = S.POLICY_ID,
+    T.PAYMENT_AMOUNT = S.PAYMENT_AMOUNT,
+    T.PAYMENT_DATE = S.PAYMENT_DATE,
+    T.PAYMENT_METHOD = S.PAYMENT_METHOD,
+    T.PAYMENT_STATUS = S.PAYMENT_STATUS,
+    T.CREATED_AT = S.CREATED_AT,
+    T.UPDATED_AT = S.UPDATED_AT,
+    T.RAW_PAYLOAD = S.RAW_PAYLOAD,
+    T.LOAD_TIMESTAMP = S.LOAD_TIMESTAMP,
+    T.SOURCE_SYSTEM = S.SOURCE_SYSTEM,
+    T.RECORD_HASH = S.RECORD_HASH,
+    T.STAGING_STATUS =
+        IFF(S.VALIDATION_REASON IS NULL, 'VALID', 'REJECTED'),
+    T.VALIDATION_REASON = S.VALIDATION_REASON
+
+WHEN NOT MATCHED THEN INSERT (
+    PAYMENT_ID,
+    CLAIM_ID,
+    POLICY_ID,
+    PAYMENT_AMOUNT,
+    PAYMENT_DATE,
+    PAYMENT_METHOD,
+    PAYMENT_STATUS,
+    CREATED_AT,
+    UPDATED_AT,
+    RAW_PAYLOAD,
+    SOURCE_FILE,
+    FILE_ROW_NUMBER,
+    LOAD_TIMESTAMP,
+    LOAD_BATCH_ID,
+    SOURCE_SYSTEM,
+    RECORD_HASH,
+    STAGING_STATUS,
+    VALIDATION_REASON
+)
+VALUES (
+    S.PAYMENT_ID,
+    S.CLAIM_ID,
+    S.POLICY_ID,
+    S.PAYMENT_AMOUNT,
+    S.PAYMENT_DATE,
+    S.PAYMENT_METHOD,
+    S.PAYMENT_STATUS,
+    S.CREATED_AT,
+    S.UPDATED_AT,
+    S.RAW_PAYLOAD,
+    S.SOURCE_FILE,
+    S.FILE_ROW_NUMBER,
+    S.LOAD_TIMESTAMP,
+    S.LOAD_BATCH_ID,
+    S.SOURCE_SYSTEM,
+    S.RECORD_HASH,
+    IFF(S.VALIDATION_REASON IS NULL, 'VALID', 'REJECTED'),
+    S.VALIDATION_REASON
+);

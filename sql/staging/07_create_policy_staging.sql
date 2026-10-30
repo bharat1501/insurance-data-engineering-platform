@@ -1,0 +1,31 @@
+USE DATABASE INSURANCE_DB;
+USE SCHEMA STAGING;
+
+CREATE TABLE IF NOT EXISTS POLICY_STAGING (
+    -- Business attributes
+    POLICY_ID           VARCHAR,
+    CUSTOMER_ID         VARCHAR,
+    POLICY_TYPE         VARCHAR,
+    POLICY_STATUS       VARCHAR,
+    POLICY_START_DATE   DATE,
+    POLICY_END_DATE     DATE,
+    PREMIUM_AMOUNT      NUMBER(18,2),
+    COVERAGE_AMOUNT     NUMBER(18,2),
+    AGENT_ID            VARCHAR,
+
+    -- Source timestamps
+    CREATED_AT          TIMESTAMP_NTZ,
+    UPDATED_AT          TIMESTAMP_NTZ,
+
+    -- Source metadata
+    SOURCE_FILE         VARCHAR,
+    FILE_ROW_NUMBER     NUMBER(38,0),
+    LOAD_TIMESTAMP      TIMESTAMP_NTZ,
+    LOAD_BATCH_ID       VARCHAR,
+    SOURCE_SYSTEM       VARCHAR,
+    RECORD_HASH         VARCHAR,
+
+    -- Staging validation
+    STAGING_STATUS      VARCHAR,
+    VALIDATION_REASON   VARCHAR
+);
