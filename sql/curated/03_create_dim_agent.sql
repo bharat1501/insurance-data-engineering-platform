@@ -1,0 +1,30 @@
+USE DATABASE INSURANCE_DB;
+USE SCHEMA CURATED;
+
+CREATE TABLE IF NOT EXISTS DIM_AGENT (
+    -- Surrogate and business keys
+    AGENT_SK            NUMBER(38,0) AUTOINCREMENT START 1 INCREMENT 1,
+    AGENT_ID            VARCHAR NOT NULL,
+
+    -- Agent business attributes
+    AGENT_NAME          VARCHAR,
+    AGENT_EMAIL         VARCHAR,
+    BRANCH              VARCHAR,
+    REGION              VARCHAR,
+    AGENT_STATUS        VARCHAR,
+
+    -- Source timestamps
+    SOURCE_CREATED_AT   TIMESTAMP_NTZ,
+    SOURCE_UPDATED_AT   TIMESTAMP_NTZ,
+
+    -- Source lineage
+    SOURCE_FILE         VARCHAR,
+    FILE_ROW_NUMBER     NUMBER(38,0),
+    LOAD_BATCH_ID       VARCHAR,
+    SOURCE_SYSTEM       VARCHAR,
+    RECORD_HASH         VARCHAR,
+
+    -- Audit timestamps
+    CREATED_AT          TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_AT          TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);

@@ -1,0 +1,45 @@
+USE DATABASE INSURANCE_DB;
+USE SCHEMA CURATED;
+
+CREATE TABLE IF NOT EXISTS DIM_POLICY (
+    -- Surrogate and business keys
+    POLICY_SK           NUMBER(38,0) AUTOINCREMENT START 1 INCREMENT 1,
+    POLICY_ID           VARCHAR NOT NULL,
+
+    -- Dimension relationships
+    CUSTOMER_SK         NUMBER(38,0),
+    AGENT_SK            NUMBER(38,0),
+
+    -- Business attributes
+    CUSTOMER_ID         VARCHAR,
+    AGENT_ID            VARCHAR,
+    POLICY_TYPE         VARCHAR,
+    POLICY_STATUS       VARCHAR,
+    POLICY_START_DATE   DATE,
+    POLICY_END_DATE     DATE,
+    PREMIUM_AMOUNT      NUMBER(18,2),
+    COVERAGE_AMOUNT     NUMBER(18,2),
+
+    -- Source timestamps
+    SOURCE_CREATED_AT   TIMESTAMP_NTZ,
+    SOURCE_UPDATED_AT   TIMESTAMP_NTZ,
+
+    -- SCD Type 2
+    EFFECTIVE_FROM      TIMESTAMP_NTZ NOT NULL,
+    EFFECTIVE_TO        TIMESTAMP_NTZ NOT NULL,
+    IS_CURRENT          BOOLEAN NOT NULL,
+
+    -- Change detection
+    ATTRIBUTE_HASH      VARCHAR,
+    RECORD_HASH         VARCHAR,
+
+    -- Source lineage
+    SOURCE_FILE         VARCHAR,
+    FILE_ROW_NUMBER     NUMBER(38,0),
+    LOAD_BATCH_ID       VARCHAR,
+    SOURCE_SYSTEM       VARCHAR,
+
+    -- Audit columns
+    CREATED_AT          TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_AT          TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
