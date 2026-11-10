@@ -1,0 +1,70 @@
+version: 2
+
+models:
+
+  - name: int_policy_customer
+    description: "Policy records enriched with customer attributes"
+    columns:
+      - name: policy_id
+        data_tests:
+          - not_null
+          - unique
+
+      - name: customer_match_status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['MATCHED', 'CUSTOMER_NOT_FOUND']
+
+  - name: int_policy_agent
+    description: "Policy records enriched with agent attributes"
+    columns:
+      - name: policy_id
+        data_tests:
+          - not_null
+          - unique
+
+      - name: agent_match_status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values:
+                  - MATCHED
+                  - AGENT_NOT_FOUND
+                  - AGENT_ID_NOT_PROVIDED
+
+  - name: int_claim_enriched
+    description: "Claims enriched with policy and customer attributes"
+    columns:
+      - name: claim_id
+        data_tests:
+          - not_null
+          - unique
+
+      - name: claim_relationship_status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values:
+                  - MATCHED
+                  - POLICY_NOT_FOUND
+                  - CUSTOMER_NOT_FOUND
+                  - POLICY_CUSTOMER_MISMATCH
+
+  - name: int_payment_enriched
+    description: "Payments enriched with claim, policy and customer attributes"
+    columns:
+      - name: payment_id
+        data_tests:
+          - not_null
+          - unique
+
+      - name: payment_relationship_status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values:
+                  - MATCHED
+                  - CLAIM_NOT_FOUND
+                  - POLICY_NOT_FOUND
+                  - PAYMENT_POLICY_MISMATCH
