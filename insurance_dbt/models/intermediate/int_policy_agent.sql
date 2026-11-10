@@ -1,0 +1,36 @@
+
+{{ config(materialized='view') }}
+
+SELECT
+    P.POLICY_ID,
+    P.CUSTOMER_ID,
+    P.AGENT_ID,
+    P.POLICY_TYPE,
+    P.POLICY_STATUS,
+    P.POLICY_START_DATE,
+    P.POLICY_END_DATE,
+    P.PREMIUM_AMOUNT,
+    P.COVERAGE_AMOUNT,
+
+    A.AGENT_NAME,
+    A.AGENT_EMAIL,
+    A.BRANCH,
+    A.REGION,
+    A.AGENT_STATUS,
+
+    CASE
+        WHEN P.AGENT_ID IS NULL THEN 'AGENT_ID_NOT_PROVIDED'
+        WHEN A.AGENT_ID IS NOT NULL THEN 'MATCHED'
+        ELSE 'AGENT_NOT_FOUND'
+    END AS AGENT_MATCH_STATUS,
+
+    P.SOURCE_FILE,
+    P.LOAD_BATCH_ID,
+    P.SOURCE_SYSTEM,
+    P.RECORD_HASH
+
+FROM {{ ref('stg_policy') }} P
+
+LEFT JOIN {{ ref('stg_agent') }} A
+    ON P.AGENT_ID = A.AGENT_ID
+
