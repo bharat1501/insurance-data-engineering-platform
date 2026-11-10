@@ -1,0 +1,39 @@
+
+{{ config(materialized='view') }}
+
+SELECT
+    P.POLICY_ID,
+    P.CUSTOMER_ID,
+    P.AGENT_ID,
+    P.POLICY_TYPE,
+    P.POLICY_STATUS,
+    P.POLICY_START_DATE,
+    P.POLICY_END_DATE,
+    P.PREMIUM_AMOUNT,
+    P.COVERAGE_AMOUNT,
+
+    C.FIRST_NAME,
+    C.LAST_NAME,
+    C.DATE_OF_BIRTH,
+    C.EMAIL,
+    C.PHONE,
+    C.ADDRESS,
+    C.CITY,
+    C.STATE,
+    C.CUSTOMER_TYPE,
+
+    CASE
+        WHEN C.CUSTOMER_ID IS NOT NULL THEN 'MATCHED'
+        ELSE 'CUSTOMER_NOT_FOUND'
+    END AS CUSTOMER_MATCH_STATUS,
+
+    P.SOURCE_FILE,
+    P.LOAD_BATCH_ID,
+    P.SOURCE_SYSTEM,
+    P.RECORD_HASH
+
+FROM {{ ref('stg_policy') }} P
+
+LEFT JOIN {{ ref('stg_customer') }} C
+    ON P.CUSTOMER_ID = C.CUSTOMER_ID
+

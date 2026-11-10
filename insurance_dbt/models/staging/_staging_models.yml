@@ -1,0 +1,104 @@
+
+version: 2
+
+models:
+
+  - name: stg_customer
+    description: "Validated customer records from the Snowflake staging layer"
+    columns:
+      - name: customer_id
+        description: "Unique business identifier for each customer"
+        data_tests:
+          - not_null
+          - unique
+
+  - name: stg_agent
+    description: "Validated insurance agent records"
+    columns:
+      - name: agent_id
+        description: "Unique business identifier for each agent"
+        data_tests:
+          - not_null
+          - unique
+
+  - name: stg_policy
+    description: "Validated insurance policy records"
+    columns:
+      - name: policy_id
+        description: "Unique business identifier for each policy"
+        data_tests:
+          - not_null
+          - unique
+
+      - name: customer_id
+        description: "Customer associated with the policy"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_customer')
+                field: customer_id
+
+      - name: agent_id
+        description: "Agent associated with the policy"
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_agent')
+                field: agent_id
+
+  - name: stg_claim
+    description: "Validated insurance claim records"
+    columns:
+      - name: claim_id
+        description: "Unique business identifier for each claim"
+        data_tests:
+          - not_null
+          - unique
+
+      - name: policy_id
+        description: "Policy associated with the claim"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_policy')
+                field: policy_id
+
+      - name: customer_id
+        description: "Customer associated with the claim"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_customer')
+                field: customer_id
+
+  - name: stg_payment
+    description: "Validated insurance payment records"
+    columns:
+      - name: payment_id
+        description: "Unique business identifier for each payment"
+        data_tests:
+          - not_null
+          - unique
+
+      - name: claim_id
+        description: "Claim associated with the payment"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_claim')
+                field: claim_id
+
+      - name: policy_id
+        description: "Policy associated with the payment"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_policy')
+                field: policy_id
+
+

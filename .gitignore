@@ -230,3 +230,25 @@ data/generated/
 # Local IDE configuration
 .idea/
 .vscode/
+
+# Python virtual environments
+.venv/
+.venv-dbt/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# dbt generated files
+insurance_dbt/target/
+insurance_dbt/logs/
+insurance_dbt/dbt_packages/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store

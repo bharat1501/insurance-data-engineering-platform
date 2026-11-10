@@ -1,0 +1,25 @@
+
+version: 2
+
+sources:
+  - name: insurance_staging
+    description: "Validated insurance data loaded into Snowflake staging layer"
+    database: INSURANCE_DB
+    schema: STAGING
+
+    tables:
+      - name: customer_staging
+        description: "Validated customer source records"
+
+      - name: agent_staging
+        description: "Validated insurance agent records"
+
+      - name: policy_staging
+        description: "Validated insurance policy records"
+
+      - name: claim_staging
+        description: "Validated insurance claim records"
+
+      - name: payment_staging
+        description: "Validated insurance payment records"
+
