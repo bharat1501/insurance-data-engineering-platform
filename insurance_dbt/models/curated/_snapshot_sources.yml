@@ -1,0 +1,27 @@
+version: 2
+
+sources:
+  - name: insurance_curated
+    description: "Curated insurance data including dbt snapshots"
+    database: INSURANCE_DB
+    schema: DBT_CURATED
+
+    tables:
+      - name: snap_customer
+        description: >
+          Customer history maintained using dbt SCD Type 2 snapshots.
+          Each customer can have multiple historical versions, with
+          exactly one current version.
+
+        columns:
+          - name: CUSTOMER_ID
+            description: "Business key identifying the customer"
+
+          - name: DBT_VALID_FROM
+            description: "Timestamp when this customer version became valid"
+
+          - name: DBT_VALID_TO
+            description: "Timestamp when this customer version expired; NULL indicates current version"
+
+          - name: DBT_SCD_ID
+            description: "Unique identifier for each customer snapshot version"
